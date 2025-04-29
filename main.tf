@@ -1,126 +1,158 @@
-# Download Debian image
-resource "libvirt_volume" "debian_image" {
-  name   = "${var.vm_name}-debian-base"
-  source = var.debian_image_url
+# Create a Docker network for all services
+resource "docker_network" "cicd_network" {
+  name = "dinner1-cicd-network"
 }
 
-# Create disk for VM
-resource "libvirt_volume" "vm_disk" {
-  name           = "${var.vm_name}-disk"
-  base_volume_id = libvirt_volume.debian_image.id
-  size           = var.vm_disk_size
+# Create a Docker volume for persistent data
+resource "docker_volume" "gitlab_data" {
+  name = "gitlab-data"
 }
 
-# Read in the SSH public key
-data "local_file" "ssh_public_key" {
-  filename = pathexpand(var.ssh_key_file)
+resource "docker_volume" "sonarqube_data" {
+  name = "sonarqube-data"
 }
 
-# Cloud-init configuration for VM
-resource "libvirt_cloudinit_disk" "cloud_init" {
-  name      = "${var.vm_name}-cloudinit.iso"
-  user_data = <<-EOF
-    #cloud-config
-    hostname: ${var.vm_name}
-    fqdn: ${var.vm_name}.local
-    manage_etc_hosts: true
-    users:
-      - name: debian
-        sudo: ALL=(ALL) NOPASSWD:ALL
-        home: /home/debian
-        shell: /bin/bash
-        lock_passwd: false
-        ssh-authorized-keys:
-          - ${trimspace(data.local_file.ssh_public_key.content)}
-    packages:
-      - curl
-      - wget
-      - gnupg
-      - lsb-release
-      - apt-transport-https
-      - ca-certificates
-      - software-properties-common
-      - unzip
-    runcmd:
-      - echo "vm.max_map_count=262144" >> /etc/sysctl.conf
-      - sysctl -p
-  EOF
+resource "docker_volume" "sonarqube_logs" {
+  name = "sonarqube-logs"
 }
 
-# Create the VM
-resource "libvirt_domain" "dinner1_cicd_vm" {
-  name   = var.vm_name
-  memory = var.vm_memory
-  vcpu   = var.vm_vcpu
+resource "docker_volume" "sonarqube_extensions" {
+  name = "sonarqube-extensions"
+}
 
-  cloudinit = libvirt_cloudinit_disk.cloud_init.id
+resource "docker_volume" "sonarqube_db" {
+  name = "sonarqube-db"
+}
 
-  disk {
-    volume_id = libvirt_volume.vm_disk.id
+# Deploy GitLab container
+resource "docker_container" "gitlab" {
+  name    = "gitlab"
+  image   = "gitlab/gitlab-ce:latest"
+  restart = "always"
+
+  ports {
+    internal = 80
+    external = 8080
   }
 
-  network_interface {
-    network_name   = "default"
-    wait_for_lease = true
+  ports {
+    internal = 22
+    external = 2222
   }
 
-  console {
-    type        = "pty"
-    target_port = "0"
-    target_type = "serial"
+  volumes {
+    container_path = "/etc/gitlab"
+    volume_name    = docker_volume.gitlab_data.name
   }
 
-  provisioner "remote-exec" {
-    inline = [
-      "echo 'Waiting for cloud-init to complete...'",
-      "cloud-init status --wait",
-      "sudo apt-get update",
-      "sudo apt-get upgrade -y",
-      "mkdir -p /tmp/scripts"
-    ]
+  volumes {
+    container_path = "/var/log/gitlab"
+    host_path      = "${path.cwd}/gitlab-logs"
+  }
 
-    connection {
-      type        = "ssh"
-      user        = "debian"
-      host        = self.network_interface[0].addresses[0]
-      private_key = file(pathexpand(replace(var.ssh_key_file, ".pub", "")))
-    }
+  volumes {
+    container_path = "/var/opt/gitlab"
+    host_path      = "${path.cwd}/gitlab-data"
+  }
+
+  env = [
+    "GITLAB_OMNIBUS_CONFIG=external_url 'http://${var.gitlab_domain}'; gitlab_rails['initial_root_password'] = '${var.admin_password}';"
+  ]
+
+  networks_advanced {
+    name = docker_network.cicd_network.name
+  }
+
+  hostname = var.gitlab_domain
+}
+
+# Deploy SonarQube database container
+resource "docker_container" "sonarqube_db" {
+  name    = "sonarqube-db"
+  image   = "postgres:13"
+  restart = "always"
+
+  env = [
+    "POSTGRES_USER=sonar",
+    "POSTGRES_PASSWORD=sonar",
+    "POSTGRES_DB=sonar"
+  ]
+
+  volumes {
+    container_path = "/var/lib/postgresql/data"
+    volume_name    = docker_volume.sonarqube_db.name
+  }
+
+  networks_advanced {
+    name = docker_network.cicd_network.name
   }
 }
 
-# Install and configure Docker
-module "docker" {
-  source = "./modules/docker/scripts"
+# Deploy SonarQube container
+resource "docker_container" "sonarqube" {
+  name    = "sonarqube"
+  image   = "sonarqube:lts"
+  restart = "always"
 
-  vm_ip           = libvirt_domain.dinner1_cicd_vm.network_interface[0].addresses[0]
-  user            = "debian"
-  ssh_private_key = file(pathexpand(replace(var.ssh_key_file, ".pub", "")))
+  depends_on = [docker_container.sonarqube_db]
 
-  depends_on = [libvirt_domain.dinner1_cicd_vm]
+  ports {
+    internal = 9000
+    external = 9000
+  }
+
+  env = [
+    "SONAR_JDBC_URL=jdbc:postgresql://sonarqube-db:5432/sonar",
+    "SONAR_JDBC_USERNAME=sonar",
+    "SONAR_JDBC_PASSWORD=sonar"
+  ]
+
+  volumes {
+    container_path = "/opt/sonarqube/data"
+    volume_name    = docker_volume.sonarqube_data.name
+  }
+
+  volumes {
+    container_path = "/opt/sonarqube/extensions"
+    volume_name    = docker_volume.sonarqube_extensions.name
+  }
+
+  volumes {
+    container_path = "/opt/sonarqube/logs"
+    volume_name    = docker_volume.sonarqube_logs.name
+  }
+
+  networks_advanced {
+    name = docker_network.cicd_network.name
+  }
+
+  hostname = var.sonarqube_domain
 }
 
-# Install and configure GitLab
-module "gitlab" {
-  source = "./modules/gitlab/scripts"
+# Deploy GitLab Runner container
+resource "docker_container" "gitlab_runner" {
+  name    = "gitlab-runner"
+  image   = "gitlab/gitlab-runner:latest"
+  restart = "always"
 
-  vm_ip           = libvirt_domain.dinner1_cicd_vm.network_interface[0].addresses[0]
-  user            = "debian"
-  ssh_private_key = file(pathexpand(replace(var.ssh_key_file, ".pub", "")))
-  gitlab_domain   = var.gitlab_domain
-  admin_password  = var.admin_password
+  depends_on = [docker_container.gitlab]
 
-  depends_on = [module.docker]
-}
+  volumes {
+    container_path = "/var/run/docker.sock"
+    host_path      = "/var/run/docker.sock"
+  }
 
-# Install and configure SonarQube
-module "sonarqube" {
-  source = "./modules/sonarqube/scripts"
+  volumes {
+    container_path = "/etc/gitlab-runner"
+    host_path      = "${path.cwd}/gitlab-runner-config"
+  }
 
-  vm_ip            = libvirt_domain.dinner1_cicd_vm.network_interface[0].addresses[0]
-  user             = "debian"
-  ssh_private_key  = file(pathexpand(replace(var.ssh_key_file, ".pub", "")))
-  sonarqube_domain = var.sonarqube_domain
-  admin_password   = var.admin_password
+  networks_advanced {
+    name = docker_network.cicd_network.name
+  }
 
-  depends_on = [module.docker]
+  command = [
+    "run",
+    "--listen-address=:9252"
+  ]
 }
