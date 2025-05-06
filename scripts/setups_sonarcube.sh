@@ -1,158 +1,70 @@
 #!/bin/bash
 set -e
 
-# Environment variables
-SONARQUBE_DOMAIN=${SONARQUBE_DOMAIN:-sonarqube.local}
-ADMIN_PASSWORD=${ADMIN_PASSWORD:-Dinner1CI4dm1n!}
+SONARQUBE_CONTAINER_NAME="sonarqube" # As defined in main.tf
+SONARQUBE_DOMAIN=${SONARQUBE_DOMAIN:-sonarqube.local} # Should match var.sonarqube_domain
+ADMIN_PASSWORD=${ADMIN_PASSWORD:-Dinner1CI4dm1n!} # Default admin password to change FROM is 'admin'
+NEW_ADMIN_PASSWORD=${NEW_ADMIN_PASSWORD:-Dinner1CI4dm1n!} # Should match var.sonarqube_admin_password if you intend to set it via API
 
-echo "Installing SonarQube..."
+echo "--------------------------------------------------------------------------------"
+echo "SonarQube Post-Setup Information (macOS / Docker Desktop)"
+echo "--------------------------------------------------------------------------------"
+echo ""
+echo "SonarQube and its PostgreSQL database are deployed via Terraform using Docker."
+echo "Access SonarQube at: http://${SONARQUBE_DOMAIN}:9000 or http://localhost:9000"
+echo "Default initial admin username: admin"
+echo "Default initial admin password: admin"
+echo ""
 
-# Create docker-compose for SonarQube
-mkdir -p /opt/sonarqube
-cat > /opt/sonarqube/docker-compose.yml << EOF
-version: '3.8'
+echo "Checking if SonarQube container '${SONARQUBE_CONTAINER_NAME}' is running..."
+if ! docker ps --filter "name=${SONARQUBE_CONTAINER_NAME}" --filter "status=running" --format "{{.Names}}" | grep -q "^${SONARQUBE_CONTAINER_NAME}$"; then
+    echo "Error: SonarQube container '${SONARQUBE_CONTAINER_NAME}' is not running."
+    echo "Please ensure you have run 'terraform apply' successfully."
+    exit 1
+fi
+echo "SonarQube container is running."
+echo ""
 
-services:
-  sonarqube-db:
-    image: postgres:13
-    container_name: sonarqube-db
-    environment:
-      - POSTGRES_USER=sonar
-      - POSTGRES_PASSWORD=sonar
-      - POSTGRES_DB=sonar
-    volumes:
-      - sonarqube_db:/var/lib/postgresql/data
-    restart: always
-    networks:
-      - sonarnet
-
-  sonarqube:
-    image: sonarqube:lts
-    container_name: sonarqube
-    depends_on:
-      - sonarqube-db
-    environment:
-      - SONAR_JDBC_URL=jdbc:postgresql://sonarqube-db:5432/sonar
-      - SONAR_JDBC_USERNAME=sonar
-      - SONAR_JDBC_PASSWORD=sonar
-    volumes:
-      - sonarqube_data:/opt/sonarqube/data
-      - sonarqube_extensions:/opt/sonarqube/extensions
-      - sonarqube_logs:/opt/sonarqube/logs
-    ports:
-      - "9000:9000"
-    restart: always
-    networks:
-      - sonarnet
-
-networks:
-  sonarnet:
-    driver: bridge
-
-volumes:
-  sonarqube_data:
-  sonarqube_extensions:
-  sonarqube_logs:
-  sonarqube_db:
-EOF
-
-# Start SonarQube
-cd /opt/sonarqube
-docker compose up -d
-
-# Update hosts file for local domain resolution
-echo "127.0.0.1 ${SONARQUBE_DOMAIN}" >> /etc/hosts
-
-# Wait for SonarQube to become available
-echo "Waiting for SonarQube to become available..."
-until curl -s http://localhost:9000/api/system/status | grep -q '"status":"UP"'; do
-  echo "Waiting for SonarQube to start..."
-  sleep 10
+echo "Waiting for SonarQube to be operational... (this might take a few minutes)"
+MAX_ATTEMPTS=30
+SLEEP_DURATION=10
+attempt_num=1
+until curl -s -I -u admin:admin "http://localhost:9000/api/system/status" | grep -q "HTTP/1.1 200"; do
+    if [ ${attempt_num} -eq ${MAX_ATTEMPTS} ]; then
+        echo "Error: SonarQube did not become operational after ${MAX_ATTEMPTS} attempts."
+        echo "Please check the container logs: docker logs ${SONARQUBE_CONTAINER_NAME}"
+        exit 1
+    fi
+    echo "Attempt ${attempt_num}/${MAX_ATTEMPTS}: SonarQube not ready yet, sleeping for ${SLEEP_DURATION}s..."
+    sleep ${SLEEP_DURATION}
+    attempt_num=$((attempt_num+1))
 done
+echo "SonarQube is operational."
+echo ""
 
-# Change default admin password
-echo "Updating SonarQube admin password..."
-curl -u admin:admin -X POST "http://localhost:9000/api/users/change_password?login=admin&previousPassword=admin&password=${ADMIN_PASSWORD}"
+echo "To change the default SonarQube admin password (admin/admin) to '${NEW_ADMIN_PASSWORD}':"
+echo "1. Execute the following command in your terminal:"
+echo "   curl -u admin:admin -X POST \"http://localhost:9000/api/users/change_password?login=admin&previousPassword=admin&password=${NEW_ADMIN_PASSWORD}\""
+echo "   (Ensure you replace '${NEW_ADMIN_PASSWORD}' if you chose a different one.)"
+echo ""
 
-# Setup quality gates for different project types
-cat > /opt/sonarqube/setup_quality_gates.sh << 'EOF'
-#!/bin/bash
+# Note: The quality gate setup from the original script is complex and involves multiple API calls.
+# It's better to guide the user to do this via the SonarQube UI or a dedicated script if full automation is needed.
+echo "To set up Quality Gates:"
+echo "1. Log in to SonarQube (http://localhost:9000) as admin."
+echo "2. Navigate to 'Quality Gates' and configure them as required."
+echo "   The original script attempted to create a gate named 'Dinner1 Standard Gate' with specific conditions."
+echo "   You can replicate this manually or adapt the curl commands from the original script if needed."
+echo "   Example for creating a quality gate (adapt as necessary):"
+echo "   curl -u admin:${NEW_ADMIN_PASSWORD} -X POST \"http://localhost:9000/api/qualitygates/create?name=MyCustomGate\""
+echo ""
 
-SONAR_URL="http://localhost:9000"
-ADMIN_USER="admin"
-ADMIN_PASSWORD="${ADMIN_PASSWORD}"
+echo "Local Domain Resolution (/${SONARQUBE_DOMAIN}):"
+echo "To access SonarQube via http://${SONARQUBE_DOMAIN}:9000, you might need to add an entry to your /etc/hosts file on macOS."
+echo "1. Open Terminal and run: sudo nano /etc/hosts"
+echo "2. Add the line: 127.0.0.1 ${SONARQUBE_DOMAIN}"
+echo "3. Save the file (Ctrl+O, Enter, then Ctrl+X)."
+echo "   Alternatively, access SonarQube via http://localhost:9000."
+echo ""
 
-# Create quality gate
-QUALITY_GATE_ID=$(curl -s -u "${ADMIN_USER}:${ADMIN_PASSWORD}" -X POST "${SONAR_URL}/api/qualitygates/create?name=Dinner1%20Standard%20Gate" | grep -o '"id":[0-9]*' | cut -d':' -f2)
-
-# Add conditions to quality gate
-# Bugs
-curl -s -u "${ADMIN_USER}:${ADMIN_PASSWORD}" -X POST "${SONAR_URL}/api/qualitygates/create_condition" \
-  --data-urlencode "gateId=${QUALITY_GATE_ID}" \
-  --data-urlencode "metric=bugs" \
-  --data-urlencode "op=GT" \
-  --data-urlencode "error=0"
-
-# Vulnerabilities
-curl -s -u "${ADMIN_USER}:${ADMIN_PASSWORD}" -X POST "${SONAR_URL}/api/qualitygates/create_condition" \
-  --data-urlencode "gateId=${QUALITY_GATE_ID}" \
-  --data-urlencode "metric=vulnerabilities" \
-  --data-urlencode "op=GT" \
-  --data-urlencode "error=0"
-
-# Code Smells
-curl -s -u "${ADMIN_USER}:${ADMIN_PASSWORD}" -X POST "${SONAR_URL}/api/qualitygates/create_condition" \
-  --data-urlencode "gateId=${QUALITY_GATE_ID}" \
-  --data-urlencode "metric=code_smells" \
-  --data-urlencode "op=GT" \
-  --data-urlencode "error=20"
-
-# Code Coverage
-curl -s -u "${ADMIN_USER}:${ADMIN_PASSWORD}" -X POST "${SONAR_URL}/api/qualitygates/create_condition" \
-  --data-urlencode "gateId=${QUALITY_GATE_ID}" \
-  --data-urlencode "metric=coverage" \
-  --data-urlencode "op=LT" \
-  --data-urlencode "error=80"
-
-# Duplicated Lines
-curl -s -u "${ADMIN_USER}:${ADMIN_PASSWORD}" -X POST "${SONAR_URL}/api/qualitygates/create_condition" \
-  --data-urlencode "gateId=${QUALITY_GATE_ID}" \
-  --data-urlencode "metric=duplicated_lines_density" \
-  --data-urlencode "op=GT" \
-  --data-urlencode "error=3"
-
-# Set as default
-curl -s -u "${ADMIN_USER}:${ADMIN_PASSWORD}" -X POST "${SONAR_URL}/api/qualitygates/set_as_default" \
-  --data-urlencode "id=${QUALITY_GATE_ID}"
-
-echo "Quality gate 'Dinner1 Standard Gate' has been created and set as default"
-EOF
-
-chmod +x /opt/sonarqube/setup_quality_gates.sh
-ADMIN_PASSWORD=${ADMIN_PASSWORD} /opt/sonarqube/setup_quality_gates.sh
-
-# Create NGINX proxy for custom domain
-apt-get install -y nginx
-
-cat > /etc/nginx/sites-available/${SONARQUBE_DOMAIN} << EOF
-server {
-    listen 80;
-    server_name ${SONARQUBE_DOMAIN};
-
-    location / {
-        proxy_pass http://localhost:9000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-    }
-}
-EOF
-
-ln -sf /etc/nginx/sites-available/${SONARQUBE_DOMAIN} /etc/nginx/sites-enabled/
-systemctl restart nginx
-
-echo "SonarQube installation and configuration completed!"
-echo "You can access SonarQube at http://${SONARQUBE_DOMAIN}"
-echo "Username: admin"
-echo "Password: ${ADMIN_PASSWORD}"`
+echo "SonarQube post-setup guidance complete."
