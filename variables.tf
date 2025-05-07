@@ -28,3 +28,10 @@ variable "sonarqube_port" {
   description = "Port for SonarQube web access"
   default     = 9000
 }
+
+variable "gitlab_runner_token" {
+  description = "GitLab Runner registration token (obtain from GitLab Admin UI after first deploy)"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
